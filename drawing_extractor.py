@@ -410,8 +410,11 @@ class DrawingExtractorApp:
             elif provider == "Local OCR (무료)":
                 if not HAS_TESSERACT:
                     raise RuntimeError("pytesseract 패키지가 설치되지 않았습니다. 'pip install pytesseract' 실행 필요.")
-                # Tesseract 실행 경로 지정 시 (윈도우 기본 설치 경로)
-                # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+                
+                tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+                if os.path.exists(tess_path):
+                    pytesseract.pytesseract.tesseract_cmd = tess_path
+                    
                 try:
                     ocr_text = pytesseract.image_to_string(image, lang='eng+kor')
                 except Exception as e:
