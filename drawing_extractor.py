@@ -279,7 +279,9 @@ class DrawingExtractorApp:
         threading.Thread(target=self._extract, args=(api_key,), daemon=True).start()
 
     # ── AI 분석 (백그라운드 스레드) ───────────────────────────
-    def _extract(self, api_key: str):
+    def _extract(self, api_key: str, retry_count: int = 0):
+        MAX_RETRY = 2
+        WAIT_SEC  = 60
         try:
             client = genai.Client(api_key=api_key)
             image = self._load_image()
@@ -339,16 +341,33 @@ class DrawingExtractorApp:
         except Exception as exc:
             err = str(exc)
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                msg = ("API 할당량 초과 (429)\n\n"
-                       "해결 방법:\n"
-                       "1. 1~2분 후 다시 시도\n"
-                       "2. 또는 새 API 키로 교체\n\n"
-                       "무료 키는 분당 요청 수에 제한이 있습니다.")
+                if retry_count < MAX_RETRY:
+                    # 자동 재시도: 카운트다운 후 재시도
+                    def countdown(secs_left):
+                        if secs_left > 0:
+                            self.root.after(0, self.status_var.set,
+                                f"⏳  API 한도 초과 — {secs_left}초 후 자동 재시도합니다... (시도 {retry_count+1}/{MAX_RETRY})")
+                            threading.Timer(1, countdown, args=(secs_left - 1,)).start()
+                        else:
+                            self.root.after(0, self.status_var.set,
+                                "🔄  재시도 중...")
+                            threading.Thread(
+                                target=self._extract,
+                                args=(api_key, retry_count + 1),
+                                daemon=True
+                            ).start()
+                    countdown(WAIT_SEC)
+                else:
+                    self.root.after(0, self._on_error,
+                        "API 할당량 초과 (429) — 재시도 횟수 초과\n\n"
+                        "해결 방법:\n"
+                        "• 새 Gemini API 키로 교체\n"
+                        "• https://aistudio.google.com/app/apikey")
             elif "API_KEY_INVALID" in err or "API key not valid" in err:
-                msg = "API 키가 유효하지 않습니다. 키를 확인해주세요."
+                self.root.after(0, self._on_error,
+                    "API 키가 유효하지 않습니다. 키를 확인해주세요.")
             else:
-                msg = err
-            self.root.after(0, self._on_error, msg)
+                self.root.after(0, self._on_error, err)
 
     def _load_image(self) -> Image.Image:
         ext = Path(self.file_path).suffix.lower()
