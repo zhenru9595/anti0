@@ -21,6 +21,8 @@ try:
     HAS_TESSERACT = True
 except ImportError:
     HAS_TESSERACT = False
+
+try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True
 except ImportError:
