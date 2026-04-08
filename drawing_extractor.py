@@ -14,8 +14,13 @@ from PIL import Image
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import fitz  # PyMuPDF
+import re
 
 try:
+    import pytesseract
+    HAS_TESSERACT = True
+except ImportError:
+    HAS_TESSERACT = False
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True
 except ImportError:
@@ -120,7 +125,7 @@ class DrawingExtractorApp:
         tk.Label(prov_row, text="AI 모델", width=8, font=("Segoe UI", 10, "bold"), fg=TEXT_MAIN, bg=BG_PANEL, anchor="w").pack(side=tk.LEFT)
         
         self.provider_var = tk.StringVar(value=self.config.get("provider", "Gemini"))
-        for val in ["Gemini", "OpenAI"]:
+        for val in ["Gemini", "OpenAI", "Local OCR (무료)"]:
             rb = tk.Radiobutton(prov_row, text=val, variable=self.provider_var, value=val,
                                 bg=BG_PANEL, fg=TEXT_MAIN, selectcolor=BG_INPUT,
                                 activebackground=BG_PANEL, activeforeground=ACCENT, cursor="hand2",
@@ -220,15 +225,22 @@ class DrawingExtractorApp:
             key = self.config.get("gemini_key", "")
             url = "https://aistudio.google.com/app/apikey"
             text = f"🔑  Gemini API 키 발급받기 → {url} (무료 티어 15RPM/1500RPD)"
-        else:
+            self.api_entry.config(state=tk.NORMAL)
+        elif prov == "OpenAI":
             key = self.config.get("openai_key", "")
             url = "https://platform.openai.com/api-keys"
             text = f"🔑  OpenAI API 키 발급받기 → {url} (유료, 매우 향상된 성능 보장)"
+            self.api_entry.config(state=tk.NORMAL)
+        else: # Local OCR
+            key = "API 키가 필요 없습니다 (비용 완전 무료)"
+            url = "https://github.com/UB-Mannheim/tesseract/wiki"
+            text = f"⚙️  Tesseract-OCR 설치가 필요합니다 → {url}"
+            self.api_entry.config(state=tk.DISABLED)
         
         self.api_var.set(key)
         self.guide_lbl.config(text=text)
         self.guide_url = url
-        if key:
+        if prov != "Local OCR (무료)" and key:
             self.key_status_var.set(f"✅  저장된 {prov} API 키를 불러왔습니다.")
         else:
             self.key_status_var.set("")
@@ -305,7 +317,7 @@ class DrawingExtractorApp:
             return
         api_key = self.api_var.get().strip()
         prov = self.provider_var.get()
-        if not api_key:
+        if not api_key and prov != "Local OCR (무료)":
             messagebox.showwarning("API 키 없음", f"{prov} API 키를 입력해주세요.")
             return
 
@@ -314,7 +326,7 @@ class DrawingExtractorApp:
         cur_session = self._session
         self.extract_btn.config(state=tk.DISABLED, text=f"⏳  {prov} 분석 중...")
         self.save_btn.config(state=tk.DISABLED)
-        self.status_var.set(f"{prov} 서버로 도면을 분석 전송 중입니다... (최대 1분 소요)")
+        self.status_var.set(f"분석 중입니다... (최대 1분 소요)")
         threading.Thread(target=self._extract, args=(api_key, prov, 0, cur_session), daemon=True).start()
 
     # ── AI 분석 (백그라운드 스레드) ───────────────────────────
@@ -381,6 +393,40 @@ class DrawingExtractorApp:
                     max_tokens=2000,
                 )
                 text = response.choices[0].message.content.strip()
+
+            elif provider == "Local OCR (무료)":
+                if not HAS_TESSERACT:
+                    raise RuntimeError("pytesseract 패키지가 설치되지 않았습니다. 'pip install pytesseract' 실행 필요.")
+                # Tesseract 실행 경로 지정 시 (윈도우 기본 설치 경로)
+                # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+                try:
+                    ocr_text = pytesseract.image_to_string(image, lang='eng+kor')
+                except Exception as e:
+                    if "tesseract is not installed" in str(e).lower() or "not found" in str(e).lower():
+                        raise RuntimeError("Tesseract 프로그램이 설치되지 않았습니다.\nhttps://github.com/UB-Mannheim/tesseract/wiki 에서 윈도우 설치파일을 다운로드해주세요.")
+                    raise
+
+                # 단순 룰 기반 필터링
+                data = {
+                    "너비": "정보 없음", "길이": "정보 없음", "높이": "정보 없음",
+                    "반경": "정보 없음", "무게": "정보 없음", "재질": "정보 없음", 
+                    "기타 표기": ocr_text.strip()
+                }
+                
+                # 치수 추출 (예: 100mm, M4, R5)
+                dims = set(re.findall(r'(\d+(?:\.\d+)?[mM]{2})', ocr_text))
+                radiuses = set(re.findall(r'[Rr]\d+', ocr_text))
+                threads = set(re.findall(r'[Mm]\d+', ocr_text))
+                weight = set(re.findall(r'(\d+(?:\.\d+)?[kK]?[gG])', ocr_text))
+
+                if dims: data["기타 공정"] = "추출된 치수: " + ", ".join(dims)
+                if threads: data["너비"] = ", ".join(threads)
+                if radiuses: data["반경"] = ", ".join(radiuses)
+                if weight: data["무게"] = ", ".join(weight)
+
+                self.extracted_data = data
+                self.root.after(0, self._show_results, data)
+                return
 
             # 마크다운 코드 블록 제거
             if "```" in text:
