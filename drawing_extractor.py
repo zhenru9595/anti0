@@ -356,16 +356,16 @@ class DrawingExtractorApp:
                 "반드시 아래 JSON 키만 사용하여 응답하세요. 값이 없으면 '정보 없음'으로 표기.\n"
                 "단위는 값과 함께 표기 (예: 100mm, R5, 1.2kg).\n\n"
                 "{\n"
-                '  "너비": "...",\n'
-                '  "길이": "...",\n'
-                '  "높이": "...",\n'
-                '  "반경": "...",\n'
-                '  "무게": "...",\n'
-                '  "재질": "...",\n'
-                '  "표면처리": "...",\n'
-                '  "열처리": "...",\n'
-                '  "기타 공정": "...",\n'
-                '  "기타 표기": "..."\n'
+                '  "너비 / Width": "...",\n'
+                '  "길이 / Length": "...",\n'
+                '  "높이 / Height": "...",\n'
+                '  "반경 / Radius": "...",\n'
+                '  "무게 / Weight": "...",\n'
+                '  "재질 / Material": "...",\n'
+                '  "표면처리 / Finish": "...",\n'
+                '  "열처리 / Heat Treatment": "...",\n'
+                '  "기타 공정 / Other Processes": "...",\n'
+                '  "기타 표기 / Remarks": "..."\n'
                 "}\n\nJSON만 출력하고 다른 텍스트는 포함하지 마세요."
             )
 
@@ -423,11 +423,11 @@ class DrawingExtractorApp:
                         raise RuntimeError("Tesseract 프로그램이 설치되지 않았습니다.\nhttps://github.com/UB-Mannheim/tesseract/wiki 에서 윈도우 설치파일을 다운로드해주세요.")
                     raise
 
-                # 단순 룰 기반 필터링
+                # 단순 룰 기반 필터링 초기값 준비
                 data = {
-                    "너비": "정보 없음", "길이": "정보 없음", "높이": "정보 없음",
-                    "반경": "정보 없음", "무게": "정보 없음", "재질": "정보 없음", 
-                    "표면처리": "정보 없음", "기타 공정": "정보 없음", "기타 표기": ""
+                    "너비 / Width": "정보 없음", "길이 / Length": "정보 없음", "높이 / Height": "정보 없음",
+                    "반경 / Radius": "정보 없음", "무게 / Weight": "정보 없음", "재질 / Material": "정보 없음", 
+                    "표면처리 / Finish": "정보 없음", "열처리 / Heat Treatment": "정보 없음", "기타 공정 / Other Processes": "정보 없음", "기타 표기 / Remarks": ""
                 }
                 
                 # --- 위치 기반(좌표 기반) 데이터 추출 로직 ---
@@ -500,24 +500,24 @@ class DrawingExtractorApp:
                 weight_unit = set(re.findall(r'(\d+(?:\.\d+)?[kK]?[gG])', ocr_text))
 
                 # 추출된 데이터를 결과창에 바인딩
-                if threads: data["너비"] = ", ".join(threads)
-                if dims: data["길이"] = ", ".join(dims)
-                if radiuses: data["반경"] = ", ".join(radiuses)
+                if threads: data["너비 / Width"] = ", ".join(threads)
+                if dims: data["길이 / Length"] = ", ".join(dims)
+                if radiuses: data["반경 / Radius"] = ", ".join(radiuses)
                 
-                if mat: data["재질"] = mat
-                if fin: data["표면처리"] = fin
+                if mat: data["재질 / Material"] = mat
+                if fin: data["표면처리 / Finish"] = fin
                 if wgt: 
-                    data["무게"] = wgt + "g"
+                    data["무게 / Weight"] = wgt + "g"
                 elif weight_unit: 
-                    data["무게"] = ", ".join(weight_unit)
+                    data["무게 / Weight"] = ", ".join(weight_unit)
 
                 info = []
-                if part_name: info.append(f"명칭: {part_name.replace(chr(10), ' ')}")
-                if part_no: info.append(f"품번: {part_no.replace(chr(10), ' ')}")
+                if part_name: info.append(f"명칭(Name): {part_name.replace(chr(10), ' ')}")
+                if part_no: info.append(f"품번(Part No.): {part_no.replace(chr(10), ' ')}")
                 if info:
-                    data["기타 표기"] = " | ".join(info) + "\n\n[원본 인식 텍스트]\n" + ocr_text.strip()
+                    data["기타 표기 / Remarks"] = " | ".join(info) + "\n\n[원본 인식 텍스트]\n" + ocr_text.strip()
                 else:
-                    data["기타 표기"] = "[원본 인식 텍스트]\n" + ocr_text.strip()
+                    data["기타 표기 / Remarks"] = "[원본 인식 텍스트]\n" + ocr_text.strip()
 
                 self.extracted_data = data
                 self.root.after(0, self._show_results, data)
@@ -577,7 +577,7 @@ class DrawingExtractorApp:
     def _show_results(self, data: dict):
         for row in self.tree.get_children():
             self.tree.delete(row)
-        fields = ["너비", "길이", "높이", "반경", "무게", "재질", "표면처리", "열처리", "기타 공정", "기타 표기"]
+        fields = ["너비 / Width", "길이 / Length", "높이 / Height", "반경 / Radius", "무게 / Weight", "재질 / Material", "표면처리 / Finish", "열처리 / Heat Treatment", "기타 공정 / Other Processes", "기타 표기 / Remarks"]
         for i, key in enumerate(fields):
             tag = "odd" if i % 2 else "even"
             self.tree.insert("", tk.END, values=(key, data.get(key, "정보 없음")), tags=(tag,))
@@ -634,7 +634,7 @@ class DrawingExtractorApp:
                 c.border = thin
             ws.row_dimensions[3].height = 26
 
-            fields = ["너비", "길이", "높이", "반경", "무게", "재질", "표면처리", "열처리", "기타 공정", "기타 표기"]
+            fields = ["너비 / Width", "길이 / Length", "높이 / Height", "반경 / Radius", "무게 / Weight", "재질 / Material", "표면처리 / Finish", "열처리 / Heat Treatment", "기타 공정 / Other Processes", "기타 표기 / Remarks"]
             for i, key in enumerate(fields, start=4):
                 bg = "F5F7FF" if i % 2 == 0 else "FFFFFF"
                 ws[f"A{i}"] = key
