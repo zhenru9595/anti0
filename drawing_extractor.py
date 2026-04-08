@@ -195,6 +195,8 @@ class DrawingExtractorApp:
 
         self.extract_btn = self._btn(btn_bar, "🔍  도면 분석 시작", ACCENT, self._start_extraction)
         self.extract_btn.pack(side=tk.LEFT)
+        self.stop_btn = self._btn(btn_bar, "🛑  작업 정지", "#e74c3c", self._stop_extraction, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=(10, 0))
         self.save_btn = self._btn(btn_bar, "💾  엑셀로 저장", ACCENT2, self._save_excel, state=tk.DISABLED)
         self.save_btn.pack(side=tk.LEFT, padx=(10, 0))
 
@@ -311,6 +313,14 @@ class DrawingExtractorApp:
         path = raw.split("} {")[0] if "} {" in raw else raw.split()[0] if " " in raw and not Path(raw).exists() else raw
         self._set_file(path)
 
+    def _stop_extraction(self):
+        """진행 중인 모든 분석 및 대기열(타이머) 강제 종료"""
+        self._session += 1
+        self.is_busy = False
+        self.extract_btn.config(state=tk.NORMAL, text="🔍  도면 분석 시작")
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_var.set("🛑  사용자가 작업을 강제 중지했습니다.")
+
     def _start_extraction(self):
         if self.is_busy:
             return
@@ -327,6 +337,7 @@ class DrawingExtractorApp:
         self._session += 1
         cur_session = self._session
         self.extract_btn.config(state=tk.DISABLED, text=f"⏳  {prov} 분석 중...")
+        self.stop_btn.config(state=tk.NORMAL)
         self.save_btn.config(state=tk.DISABLED)
         self.status_var.set(f"분석 중입니다... (최대 1분 소요)")
         threading.Thread(target=self._extract, args=(api_key, prov, 0, cur_session), daemon=True).start()
@@ -452,6 +463,8 @@ class DrawingExtractorApp:
             if "insufficient_quota" in err or "429" in err or "RESOURCE_EXHAUSTED" in err:
                 if retry_count < MAX_RETRY and provider == "Gemini": # OpenAI는 429일시 돈 부족/한도이므로 바로 에러 리턴 권장
                     def countdown(secs_left):
+                        if session != self._session:  # 도중 정지 시 타이머 취소
+                            return
                         if secs_left > 0:
                             self.root.after(0, self.status_var.set, f"⏳  API 한도 초과 — {secs_left}초 후 자동 재시도합니다... (시도 {retry_count+1}/{MAX_RETRY})")
                             threading.Timer(1, countdown, args=(secs_left - 1,)).start()
@@ -488,12 +501,14 @@ class DrawingExtractorApp:
             self.tree.insert("", tk.END, values=(key, data.get(key, "정보 없음")), tags=(tag,))
         self.is_busy = False
         self.extract_btn.config(state=tk.NORMAL, text="🔍  도면 분석 시작")
+        self.stop_btn.config(state=tk.DISABLED)
         self.save_btn.config(state=tk.NORMAL)
         self.status_var.set("✅  분석 완료!  '엑셀로 저장' 버튼으로 결과를 저장하세요.")
 
     def _on_error(self, msg: str):
         self.is_busy = False
         self.extract_btn.config(state=tk.NORMAL, text="🔍  도면 분석 시작")
+        self.stop_btn.config(state=tk.DISABLED)
         self.status_var.set("❌  오류 발생")
         messagebox.showerror("분석 오류", f"분석 중 오류가 발생했습니다:\n\n{msg}")
 
