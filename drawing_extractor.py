@@ -445,7 +445,7 @@ class DrawingExtractorApp:
                             'mid_y': ocr_data['top'][i] + ocr_data['height'][i] / 2
                         })
 
-                def find_below(keywords, max_drop=150, x_tolerance=50):
+                def find_below(keywords, max_drop=300, x_tolerance=200):
                     # 1. 키워드 찾기
                     anchor = None
                     for w in words:
@@ -455,13 +455,15 @@ class DrawingExtractorApp:
                     if not anchor:
                         return None
                     
-                    # 2. 키워드 바로 아래 영역의 텍스트 수집
+                    # 2. 키워드 바로 아래 영역의 텍스트 수집 (여유폭 대폭 확대)
                     L, R, B = anchor['left'], anchor['right'], anchor['bottom']
                     candidates = []
                     for w in words:
                         if w['top'] > B and w['top'] < B + max_drop:
                             if (L - x_tolerance) <= w['mid_x'] <= (R + x_tolerance):
-                                candidates.append(w)
+                                # 헤더(키워드) 자신이 아래줄에 적혀있는 경우 제외
+                                if not any(k.upper() == w['text'].upper().strip() for k in keywords):
+                                    candidates.append(w)
                     
                     # 3. Y좌표가 너무 큰 차이가 나면 자르기 (다음 행으로 넘어가지 않게)
                     if not candidates:
@@ -474,9 +476,10 @@ class DrawingExtractorApp:
                     last_top = candidates[0]['top']
                     
                     for w in candidates:
-                        # top 좌표가 15px 이상 차이나면 다음 줄로 간주
-                        if w['top'] - last_top > 15:
-                            result_lines.append(" ".join([c['text'] for c in current_line]))
+                        # top 좌표가 25px 이상 차이나면 다음 줄로 간주 (해상도 대비 여유)
+                        if abs(w['top'] - last_top) > 25:
+                            if current_line:
+                                result_lines.append(" ".join([c['text'] for c in current_line]))
                             current_line = []
                         current_line.append(w)
                         last_top = w['top']
