@@ -65,6 +65,7 @@ class DrawingExtractorApp:
         self.file_path: str | None = None
         self.extracted_data: dict | None = None
         self.is_busy = False
+        self._session = 0  # 재시도 세션 토큰 — 값이 바뀌면 이전 countdown 무효화
 
         self._apply_style()
         self._build_ui()
@@ -273,15 +274,20 @@ class DrawingExtractorApp:
             return
 
         self.is_busy = True
+        self._session += 1          # 이전 재시도 루프 무효화
+        cur_session = self._session
         self.extract_btn.config(state=tk.DISABLED, text="⏳  분석 중...")
         self.save_btn.config(state=tk.DISABLED)
         self.status_var.set("AI가 도면을 분석 중입니다... 잠시 기다려주세요.")
-        threading.Thread(target=self._extract, args=(api_key,), daemon=True).start()
+        threading.Thread(target=self._extract, args=(api_key, 0, cur_session), daemon=True).start()
 
     # ── AI 분석 (백그라운드 스레드) ───────────────────────────
-    def _extract(self, api_key: str, retry_count: int = 0):
+    def _extract(self, api_key: str, retry_count: int = 0, session: int = 0):
         MAX_RETRY = 2
         WAIT_SEC  = 60
+        # 세션이 바뀌었으면 이 호출은 무효
+        if session != self._session:
+            return
         try:
             client = genai.Client(api_key=api_key)
             image = self._load_image()
