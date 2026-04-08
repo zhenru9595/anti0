@@ -23,3 +23,4 @@ def calculate_days():
 
 if __name__ == "__main__":
     calculate_days()
+    input("\n엔터를 누르면 종료됩니다...")
