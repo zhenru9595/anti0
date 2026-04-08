@@ -6,8 +6,10 @@ import threading
 from pathlib import Path
 import io
 import time
+import base64
 
 from google import genai
+import openai
 from PIL import Image
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -34,41 +36,54 @@ BORDER_COL = "#2d3050"
 CONFIG_FILE = Path(__file__).parent / ".drawing_extractor_config.json"
 
 SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg"}
-# 모델 우선순위 (앞에서부터 시도)
-MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest"]
+GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest"]
 
-
-def load_saved_key() -> str:
+def load_config() -> dict:
     try:
         if CONFIG_FILE.exists():
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8")).get("api_key", "")
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
-    return os.environ.get("GEMINI_API_KEY", "")
-
-
-def save_key(key: str):
+    # 하위 호환성 위해 예전 버전의 api_key도 읽음
     try:
-        CONFIG_FILE.write_text(json.dumps({"api_key": key}, ensure_ascii=False), encoding="utf-8")
+        if CONFIG_FILE.exists():
+            old = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if "api_key" in old and "gemini_key" not in old:
+                return {"gemini_key": old["api_key"], "provider": "Gemini"}
+    except:
+        pass
+    return {"provider": "Gemini", "gemini_key": "", "openai_key": ""}
+
+def save_config(config: dict):
+    try:
+        CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
+def pil_to_base64(img: Image.Image) -> str:
+    buffered = io.BytesIO()
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    img.save(buffered, format="JPEG", quality=85)
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 class DrawingExtractorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("도면 정보 추출기  ·  Drawing Extractor")
-        self.root.geometry("960x750")
-        self.root.minsize(780, 620)
+        self.root.title("도면 정보 추출기  ·  Drawing Extractor (Gemini & OpenAI 지원)")
+        self.root.geometry("960x780")
+        self.root.minsize(800, 650)
         self.root.configure(bg=BG_DARK)
 
+        self.config = load_config()
         self.file_path: str | None = None
         self.extracted_data: dict | None = None
         self.is_busy = False
-        self._session = 0  # 재시도 세션 토큰 — 값이 바뀌면 이전 countdown 무효화
+        self._session = 0
 
         self._apply_style()
         self._build_ui()
+        self._update_provider_ui()
 
     def _apply_style(self):
         style = ttk.Style()
@@ -95,15 +110,29 @@ class DrawingExtractorApp:
         tk.Label(hdr, text=" 도면 정보 추출기", font=("Segoe UI", 20, "bold"), bg=BG_DARK, fg=TEXT_MAIN).pack(side=tk.LEFT)
         tk.Label(hdr, text="  PDF · PNG · JPG → Excel", font=("Segoe UI", 11), bg=BG_DARK, fg=TEXT_SUB).pack(side=tk.LEFT, pady=(4, 0))
 
-        # ── API 키 ────────────────────────────────────────────
-        self._section_label("Gemini API 키")
+        # ── API 설정 ──────────────────────────────────────────
+        self._section_label("AI Provider & API 설정")
         api_card = self._card()
 
+        # 제공자 선택 라디오버튼
+        prov_row = tk.Frame(api_card, bg=BG_PANEL)
+        prov_row.pack(fill=tk.X, padx=14, pady=(10, 0))
+        tk.Label(prov_row, text="AI 모델", width=8, font=("Segoe UI", 10, "bold"), fg=TEXT_MAIN, bg=BG_PANEL, anchor="w").pack(side=tk.LEFT)
+        
+        self.provider_var = tk.StringVar(value=self.config.get("provider", "Gemini"))
+        for val in ["Gemini", "OpenAI"]:
+            rb = tk.Radiobutton(prov_row, text=val, variable=self.provider_var, value=val,
+                                bg=BG_PANEL, fg=TEXT_MAIN, selectcolor=BG_INPUT,
+                                activebackground=BG_PANEL, activeforeground=ACCENT, cursor="hand2",
+                                command=self._update_provider_ui, font=("Segoe UI", 10))
+            rb.pack(side=tk.LEFT, padx=(0, 15))
+
+        # API 키 입력
         row = tk.Frame(api_card, bg=BG_PANEL)
         row.pack(fill=tk.X, padx=14, pady=8)
-        tk.Label(row, text="API Key", width=8, font=("Segoe UI", 10), fg=TEXT_SUB, bg=BG_PANEL).pack(side=tk.LEFT)
+        tk.Label(row, text="API Key", width=8, font=("Segoe UI", 10), fg=TEXT_SUB, bg=BG_PANEL, anchor="w").pack(side=tk.LEFT)
 
-        self.api_var = tk.StringVar(value=load_saved_key())
+        self.api_var = tk.StringVar()
         self.api_entry = tk.Entry(row, textvariable=self.api_var, show="•", width=50,
                                   bg=BG_INPUT, fg=TEXT_MAIN, insertbackground=ACCENT,
                                   relief=tk.FLAT, font=("Segoe UI", 10))
@@ -119,29 +148,24 @@ class DrawingExtractorApp:
                   padx=10, pady=3, cursor="hand2",
                   command=self._save_api_key).pack(side=tk.LEFT, padx=(8, 0))
 
-        guide = tk.Label(api_card,
-                         text="🔑  API 키가 없으신가요?  →  https://aistudio.google.com/app/apikey  (무료)",
-                         font=("Segoe UI", 9), fg="#5577cc", bg=BG_PANEL, cursor="hand2")
-        guide.pack(anchor=tk.W, padx=14, pady=(0, 4))
-        guide.bind("<Button-1>", lambda _: self._open_url("https://aistudio.google.com/app/apikey"))
+        # 안내 링크
+        self.guide_lbl = tk.Label(api_card, text="", font=("Segoe UI", 9), fg="#5577cc", bg=BG_PANEL, cursor="hand2")
+        self.guide_lbl.pack(anchor=tk.W, padx=14, pady=(0, 4))
+        self.guide_lbl.bind("<Button-1>", lambda _: self._open_url(self.guide_url))
 
-        self.key_status_var = tk.StringVar(value="✅  저장된 API 키를 불러왔습니다." if load_saved_key() else "")
-        tk.Label(api_card, textvariable=self.key_status_var,
-                 font=("Segoe UI", 9), fg=ACCENT2, bg=BG_PANEL).pack(anchor=tk.W, padx=14, pady=(0, 6))
+        self.key_status_var = tk.StringVar(value="")
+        tk.Label(api_card, textvariable=self.key_status_var, font=("Segoe UI", 9), fg=ACCENT2, bg=BG_PANEL).pack(anchor=tk.W, padx=14, pady=(0, 6))
 
         # ── 파일 선택 (+ 드래그 앤 드롭) ─────────────────────
         self._section_label("도면 파일 선택")
         file_card = self._card()
 
-        # 드롭존
         self.drop_frame = tk.Frame(file_card, bg=BG_INPUT, height=100, cursor="hand2")
         self.drop_frame.pack(fill=tk.X, padx=14, pady=(10, 6))
         self.drop_frame.pack_propagate(False)
 
         dnd_hint = "📂   클릭하거나 파일을 이곳에 드래그하세요\nPDF · PNG · JPG · JPEG 지원"
-        self.drop_lbl = tk.Label(self.drop_frame, text=dnd_hint,
-                                 font=("Segoe UI", 11), fg=ACCENT, bg=BG_INPUT,
-                                 justify=tk.CENTER, cursor="hand2")
+        self.drop_lbl = tk.Label(self.drop_frame, text=dnd_hint, font=("Segoe UI", 11), fg=ACCENT, bg=BG_INPUT, justify=tk.CENTER, cursor="hand2")
         self.drop_lbl.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
         for w in (self.drop_frame, self.drop_lbl):
@@ -149,15 +173,13 @@ class DrawingExtractorApp:
             w.bind("<Enter>", lambda _: self.drop_frame.config(bg="#2a2d42"))
             w.bind("<Leave>", lambda _: self.drop_frame.config(bg=BG_INPUT))
 
-        # tkinterdnd2 드래그 앤 드롭 등록
         if DND_AVAILABLE:
             self.drop_frame.drop_target_register(DND_FILES)
             self.drop_frame.dnd_bind("<<Drop>>", self._on_drop)
             self.drop_lbl.drop_target_register(DND_FILES)
             self.drop_lbl.dnd_bind("<<Drop>>", self._on_drop)
 
-        self.file_lbl = tk.Label(file_card, text="선택된 파일 없음",
-                                 font=("Segoe UI", 9), fg=TEXT_SUB, bg=BG_PANEL)
+        self.file_lbl = tk.Label(file_card, text="선택된 파일 없음", font=("Segoe UI", 9), fg=TEXT_SUB, bg=BG_PANEL)
         self.file_lbl.pack(pady=(0, 8))
 
         # ── 버튼 바 ──────────────────────────────────────────
@@ -170,9 +192,8 @@ class DrawingExtractorApp:
         self.save_btn.pack(side=tk.LEFT, padx=(10, 0))
 
         # ── 상태 바 ──────────────────────────────────────────
-        self.status_var = tk.StringVar(value="준비 완료  —  파일을 선택하거나 드래그해서 분석을 시작하세요.")
-        tk.Label(self.root, textvariable=self.status_var,
-                 font=("Segoe UI", 9), fg=TEXT_SUB, bg=BG_DARK, anchor=tk.W).pack(fill=tk.X, padx=26, pady=(6, 2))
+        self.status_var = tk.StringVar(value="준비 완료  —  AI 모델을 선택하고 도면 파일을 업로드하세요.")
+        tk.Label(self.root, textvariable=self.status_var, font=("Segoe UI", 9), fg=TEXT_SUB, bg=BG_DARK, anchor=tk.W).pack(fill=tk.X, padx=26, pady=(6, 2))
 
         # ── 결과 테이블 ───────────────────────────────────────
         self._section_label("추출 결과")
@@ -182,7 +203,7 @@ class DrawingExtractorApp:
         self.tree = ttk.Treeview(res_card, columns=cols, show="headings", height=12)
         self.tree.heading("항목", text="  항목")
         self.tree.heading("추출 값", text="추출 값")
-        self.tree.column("항목",    width=160, minwidth=120, anchor=tk.CENTER)
+        self.tree.column("항목", width=160, minwidth=120, anchor=tk.CENTER)
         self.tree.column("추출 값", width=700, minwidth=300, anchor=tk.W)
 
         vsb = ttk.Scrollbar(res_card, orient=tk.VERTICAL, command=self.tree.yview)
@@ -193,10 +214,28 @@ class DrawingExtractorApp:
         self.tree.tag_configure("odd",  background=ROW_ODD)
         self.tree.tag_configure("even", background=ROW_EVEN)
 
+    def _update_provider_ui(self):
+        prov = self.provider_var.get()
+        if prov == "Gemini":
+            key = self.config.get("gemini_key", "")
+            url = "https://aistudio.google.com/app/apikey"
+            text = f"🔑  Gemini API 키 발급받기 → {url} (무료 티어 15RPM/1500RPD)"
+        else:
+            key = self.config.get("openai_key", "")
+            url = "https://platform.openai.com/api-keys"
+            text = f"🔑  OpenAI API 키 발급받기 → {url} (유료, 매우 향상된 성능 보장)"
+        
+        self.api_var.set(key)
+        self.guide_lbl.config(text=text)
+        self.guide_url = url
+        if key:
+            self.key_status_var.set(f"✅  저장된 {prov} API 키를 불러왔습니다.")
+        else:
+            self.key_status_var.set("")
+
     # ── 헬퍼 위젯 ────────────────────────────────────────────
     def _section_label(self, text):
-        tk.Label(self.root, text=text, font=("Segoe UI", 10, "bold"),
-                 fg=TEXT_SUB, bg=BG_DARK).pack(anchor=tk.W, padx=26, pady=(10, 2))
+        tk.Label(self.root, text=text, font=("Segoe UI", 10, "bold"), fg=TEXT_SUB, bg=BG_DARK).pack(anchor=tk.W, padx=26, pady=(10, 2))
 
     def _card(self, expand=False):
         f = tk.Frame(self.root, bg=BG_PANEL, highlightthickness=1, highlightbackground=BORDER_COL)
@@ -205,22 +244,27 @@ class DrawingExtractorApp:
 
     @staticmethod
     def _btn(parent, text, color, cmd, state=tk.NORMAL):
-        return tk.Button(parent, text=text, bg=color, fg="white",
-                         activebackground=color, activeforeground="white",
-                         font=("Segoe UI", 11, "bold"), relief=tk.FLAT, bd=0,
-                         padx=18, pady=8, cursor="hand2", command=cmd, state=state)
+        return tk.Button(parent, text=text, bg=color, fg="white", activebackground=color, activeforeground="white",
+                         font=("Segoe UI", 11, "bold"), relief=tk.FLAT, bd=0, padx=18, pady=8, cursor="hand2", command=cmd, state=state)
 
-    # ── 이벤트 핸들러 ─────────────────────────────────────────
     def _toggle_key(self):
         self.api_entry.config(show="" if self.show_var.get() else "•")
 
     def _save_api_key(self):
         key = self.api_var.get().strip()
+        prov = self.provider_var.get()
         if not key:
             messagebox.showwarning("경고", "API 키를 입력한 뒤 저장해주세요.")
             return
-        save_key(key)
-        self.key_status_var.set("✅  API 키가 저장되었습니다. 다음 실행 시 자동으로 불러옵니다.")
+        
+        self.config["provider"] = prov
+        if prov == "Gemini":
+            self.config["gemini_key"] = key
+        else:
+            self.config["openai_key"] = key
+            
+        save_config(self.config)
+        self.key_status_var.set(f"✅  {prov} API 키가 저장되었습니다.")
 
     @staticmethod
     def _open_url(url):
@@ -228,11 +272,9 @@ class DrawingExtractorApp:
         webbrowser.open(url)
 
     def _set_file(self, path: str):
-        """파일 경로 설정 (클릭 / 드래그 공통)"""
         ext = Path(path).suffix.lower()
         if ext not in SUPPORTED_EXT:
-            messagebox.showwarning("지원하지 않는 형식",
-                                   f"'{ext}' 파일은 지원되지 않습니다.\nPDF, PNG, JPG, JPEG 파일만 사용 가능합니다.")
+            messagebox.showwarning("지원하지 않는 형식", f"'{ext}' 파일은 지원되지 않습니다.\nPDF, PNG, JPG, JPEG 파일만 사용 가능합니다.")
             return
         self.file_path = path
         name = Path(path).name
@@ -243,19 +285,15 @@ class DrawingExtractorApp:
     def _browse(self):
         path = filedialog.askopenfilename(
             title="도면 파일 선택",
-            filetypes=[("지원 형식", "*.pdf *.png *.jpg *.jpeg"),
-                       ("PDF", "*.pdf"), ("이미지", "*.png *.jpg *.jpeg"), ("모두", "*.*")]
+            filetypes=[("지원 형식", "*.pdf *.png *.jpg *.jpeg"), ("PDF", "*.pdf"), ("이미지", "*.png *.jpg *.jpeg"), ("모두", "*.*")]
         )
         if path:
             self._set_file(path)
 
     def _on_drop(self, event):
-        """드래그 앤 드롭 처리"""
         raw = event.data.strip()
-        # tkinterdnd2는 중괄호로 경로를 감쌀 때가 있음
         if raw.startswith("{") and raw.endswith("}"):
             raw = raw[1:-1]
-        # 공백 포함 경로 처리: 첫 번째 파일만 사용
         path = raw.split("} {")[0] if "} {" in raw else raw.split()[0] if " " in raw and not Path(raw).exists() else raw
         self._set_file(path)
 
@@ -266,32 +304,28 @@ class DrawingExtractorApp:
             messagebox.showwarning("파일 없음", "도면 파일을 먼저 선택해주세요.")
             return
         api_key = self.api_var.get().strip()
+        prov = self.provider_var.get()
         if not api_key:
-            messagebox.showwarning("API 키 없음",
-                                   "Gemini API 키를 입력해주세요.\n\n"
-                                   "무료 발급: https://aistudio.google.com/app/apikey\n"
-                                   "발급 후 붙여넣기 → '키 저장' 클릭")
+            messagebox.showwarning("API 키 없음", f"{prov} API 키를 입력해주세요.")
             return
 
         self.is_busy = True
-        self._session += 1          # 이전 재시도 루프 무효화
+        self._session += 1
         cur_session = self._session
-        self.extract_btn.config(state=tk.DISABLED, text="⏳  분석 중...")
+        self.extract_btn.config(state=tk.DISABLED, text=f"⏳  {prov} 분석 중...")
         self.save_btn.config(state=tk.DISABLED)
-        self.status_var.set("AI가 도면을 분석 중입니다... 잠시 기다려주세요.")
-        threading.Thread(target=self._extract, args=(api_key, 0, cur_session), daemon=True).start()
+        self.status_var.set(f"{prov} 서버로 도면을 분석 전송 중입니다... (최대 1분 소요)")
+        threading.Thread(target=self._extract, args=(api_key, prov, 0, cur_session), daemon=True).start()
 
     # ── AI 분석 (백그라운드 스레드) ───────────────────────────
-    def _extract(self, api_key: str, retry_count: int = 0, session: int = 0):
+    def _extract(self, api_key: str, provider: str, retry_count: int = 0, session: int = 0):
         MAX_RETRY = 2
         WAIT_SEC  = 60
-        # 세션이 바뀌었으면 이 호출은 무효
         if session != self._session:
             return
+            
         try:
-            client = genai.Client(api_key=api_key)
             image = self._load_image()
-
             prompt = (
                 "아래 도면 이미지를 분석하여 공학/제조 정보를 추출해주세요.\n"
                 "반드시 아래 JSON 키만 사용하여 응답하세요. 값이 없으면 '정보 없음'으로 표기.\n"
@@ -310,24 +344,43 @@ class DrawingExtractorApp:
                 "}\n\nJSON만 출력하고 다른 텍스트는 포함하지 마세요."
             )
 
-            # 모델 순차 시도
-            last_err = None
-            for model_name in MODELS:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=[prompt, image],
-                    )
-                    text = response.text.strip()
-                    break  # 성공
-                except Exception as e:
-                    last_err = e
-                    err_str = str(e)
-                    if "404" in err_str or "NOT_FOUND" in err_str:
-                        continue  # 다음 모델 시도
-                    raise  # 다른 오류는 즉시 raise
-            else:
-                raise last_err
+            text = ""
+            if provider == "Gemini":
+                client = genai.Client(api_key=api_key)
+                last_err = None
+                for model_name in GEMINI_MODELS:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=[prompt, image],
+                        )
+                        text = response.text.strip()
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if "404" in str(e) or "NOT_FOUND" in str(e):
+                            continue
+                        raise
+                else:
+                    raise last_err
+
+            elif provider == "OpenAI":
+                b64_img = pil_to_base64(image)
+                client = openai.OpenAI(api_key=api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}},
+                            ],
+                        }
+                    ],
+                    max_tokens=2000,
+                )
+                text = response.choices[0].message.content.strip()
 
             # 마크다운 코드 블록 제거
             if "```" in text:
@@ -346,32 +399,26 @@ class DrawingExtractorApp:
             self.root.after(0, self._on_error, f"JSON 파싱 실패.\nAI 응답:\n{raw[:400]}")
         except Exception as exc:
             err = str(exc)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                if retry_count < MAX_RETRY:
-                    # 자동 재시도: 카운트다운 후 재시도
+            
+            # OpenAI 에러 처리
+            if "insufficient_quota" in err or "429" in err or "RESOURCE_EXHAUSTED" in err:
+                if retry_count < MAX_RETRY and provider == "Gemini": # OpenAI는 429일시 돈 부족/한도이므로 바로 에러 리턴 권장
                     def countdown(secs_left):
                         if secs_left > 0:
-                            self.root.after(0, self.status_var.set,
-                                f"⏳  API 한도 초과 — {secs_left}초 후 자동 재시도합니다... (시도 {retry_count+1}/{MAX_RETRY})")
+                            self.root.after(0, self.status_var.set, f"⏳  API 한도 초과 — {secs_left}초 후 자동 재시도합니다... (시도 {retry_count+1}/{MAX_RETRY})")
                             threading.Timer(1, countdown, args=(secs_left - 1,)).start()
                         else:
-                            self.root.after(0, self.status_var.set,
-                                "🔄  재시도 중...")
-                            threading.Thread(
-                                target=self._extract,
-                                args=(api_key, retry_count + 1),
-                                daemon=True
-                            ).start()
+                            self.root.after(0, self.status_var.set, "🔄  재시도 중...")
+                            threading.Thread(target=self._extract, args=(api_key, provider, retry_count + 1, session), daemon=True).start()
                     countdown(WAIT_SEC)
                 else:
                     self.root.after(0, self._on_error,
-                        "API 할당량 초과 (429) — 재시도 횟수 초과\n\n"
-                        "해결 방법:\n"
-                        "• 새 Gemini API 키로 교체\n"
-                        "• https://aistudio.google.com/app/apikey")
-            elif "API_KEY_INVALID" in err or "API key not valid" in err:
-                self.root.after(0, self._on_error,
-                    "API 키가 유효하지 않습니다. 키를 확인해주세요.")
+                        f"API 할당량(크레딧) 초과 또는 트래픽 제한 (429)\n\n"
+                        f"• {provider} 계정에 결제 수단이 등록되어 있거나 한도가 넉넉한지 확인하세요.\n"
+                        f"• OpenAI의 경우 선불 크레딧 충전(Billing)이 필요합니다.\n"
+                        f"• 증상이 지속되면 새로운 API 키를 발급받으세요.")
+            elif "API_KEY_INVALID" in err or "API key not valid" in err or "Incorrect API key" in err:
+                self.root.after(0, self._on_error, f"{provider} API 키가 유효하지 않습니다. 키를 확인해주세요.")
             else:
                 self.root.after(0, self._on_error, err)
 
@@ -384,17 +431,13 @@ class DrawingExtractorApp:
             return Image.open(io.BytesIO(pix.tobytes("png")))
         return Image.open(self.file_path)
 
-    # ── 결과 표시 ─────────────────────────────────────────────
     def _show_results(self, data: dict):
         for row in self.tree.get_children():
             self.tree.delete(row)
-
-        fields = ["너비", "길이", "높이", "반경", "무게",
-                  "재질", "표면처리", "열처리", "기타 공정", "기타 표기"]
+        fields = ["너비", "길이", "높이", "반경", "무게", "재질", "표면처리", "열처리", "기타 공정", "기타 표기"]
         for i, key in enumerate(fields):
             tag = "odd" if i % 2 else "even"
             self.tree.insert("", tk.END, values=(key, data.get(key, "정보 없음")), tags=(tag,))
-
         self.is_busy = False
         self.extract_btn.config(state=tk.NORMAL, text="🔍  도면 분석 시작")
         self.save_btn.config(state=tk.NORMAL)
@@ -406,7 +449,6 @@ class DrawingExtractorApp:
         self.status_var.set("❌  오류 발생")
         messagebox.showerror("분석 오류", f"분석 중 오류가 발생했습니다:\n\n{msg}")
 
-    # ── 엑셀 저장 ─────────────────────────────────────────────
     def _save_excel(self):
         if not self.extracted_data:
             return
@@ -420,21 +462,18 @@ class DrawingExtractorApp:
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "도면 정보"
-
             thin = Border(
                 left=Side(style="thin", color="D0D5E8"), right=Side(style="thin", color="D0D5E8"),
                 top=Side(style="thin", color="D0D5E8"), bottom=Side(style="thin", color="D0D5E8"),
             )
             center = Alignment(horizontal="center", vertical="center")
             left   = Alignment(horizontal="left", vertical="center", wrap_text=True)
-
             ws.merge_cells("A1:B1")
             ws["A1"] = "도면 정보 추출 결과"
             ws["A1"].font = Font(bold=True, color="FFFFFF", size=14)
             ws["A1"].fill = PatternFill("solid", fgColor="4F8EF7")
             ws["A1"].alignment = center
             ws.row_dimensions[1].height = 34
-
             ws.merge_cells("A2:B2")
             ws["A2"] = f"원본 파일: {Path(self.file_path).name}"
             ws["A2"].font = Font(size=9, color="888888")
@@ -450,8 +489,7 @@ class DrawingExtractorApp:
                 c.border = thin
             ws.row_dimensions[3].height = 26
 
-            fields = ["너비", "길이", "높이", "반경", "무게",
-                      "재질", "표면처리", "열처리", "기타 공정", "기타 표기"]
+            fields = ["너비", "길이", "높이", "반경", "무게", "재질", "표면처리", "열처리", "기타 공정", "기타 표기"]
             for i, key in enumerate(fields, start=4):
                 bg = "F5F7FF" if i % 2 == 0 else "FFFFFF"
                 ws[f"A{i}"] = key
@@ -468,16 +506,12 @@ class DrawingExtractorApp:
             ws.column_dimensions["A"].width = 16
             ws.column_dimensions["B"].width = 62
             wb.save(save_path)
-
             self.status_var.set(f"✅  저장 완료: {save_path}")
             if messagebox.askyesno("저장 완료", f"엑셀 저장 완료!\n{save_path}\n\n파일을 바로 여시겠습니까?"):
                 os.startfile(save_path)
-
         except Exception as exc:
             messagebox.showerror("저장 오류", str(exc))
 
-
-# ── 진입점 ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     if DND_AVAILABLE:
         root = TkinterDnD.Tk()
