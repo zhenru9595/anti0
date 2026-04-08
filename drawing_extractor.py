@@ -429,16 +429,46 @@ class DrawingExtractorApp:
                     "기타 표기": ocr_text.strip()
                 }
                 
-                # 치수 추출 (예: 100mm, M4, R5)
+                # 도면 테이블 문자 데이터 추출을 위해 텍스트 전처리
+                text_block = ocr_text.replace('\n', ' ').replace('\r', ' ')
+                
+                def extract_val(pattern):
+                    m = re.search(pattern, text_block, re.IGNORECASE)
+                    return m.group(1).strip() if m else None
+
+                # 정규식을 통한 키워드 주변 텍스트 캡처 (블록 단위 인식 고려)
+                mat = extract_val(r'(?:재\s*질|MATERIAL)[\s:\|]*([A-Za-z0-9\-]+(?:[\s]*[A-Za-z0-9\-]+){0,2})')
+                # 표면처리는 ZnNi 12um 3+ 등 다양하므로 좀 더 넓게 허용
+                fin = extract_val(r'(?:표\s*면\s*처\s*리|FINISH)[\s:\|]*([A-Za-z0-9\-+\.]+([\s]*[A-Za-z0-9\-+\.]+){0,2})')
+                wgt = extract_val(r'(?:중\s*량|WEIGHT)[\s\(\)gG:\|]*(\d+(?:\.\d+)?)')
+                part_no = extract_val(r'(?:도\s*면\s*번\s*호|품\s*번|PART\s*NO\.?)[\s:\|]*([A-Za-z0-9\-]+)')
+                part_name = extract_val(r'(?:도\s*면\s*명\s*칭|PART\s*NAME)[\s:\|]*([A-Za-z0-9\-,\s]+)')
+
+                # 치수 단위 추출 (단순 룰)
                 dims = set(re.findall(r'(\d+(?:\.\d+)?[mM]{2})', ocr_text))
                 radiuses = set(re.findall(r'[Rr]\d+', ocr_text))
                 threads = set(re.findall(r'[Mm]\d+', ocr_text))
-                weight = set(re.findall(r'(\d+(?:\.\d+)?[kK]?[gG])', ocr_text))
+                weight_unit = set(re.findall(r'(\d+(?:\.\d+)?[kK]?[gG])', ocr_text))
 
-                if dims: data["기타 공정"] = "추출된 치수: " + ", ".join(dims)
+                # 추출된 데이터를 결과창에 바인딩
                 if threads: data["너비"] = ", ".join(threads)
+                if dims: data["길이"] = ", ".join(dims)
                 if radiuses: data["반경"] = ", ".join(radiuses)
-                if weight: data["무게"] = ", ".join(weight)
+                
+                if mat and "FINISH" not in mat.upper() and "QTY" not in mat.upper(): 
+                    data["재질"] = mat
+                if fin and "QTY" not in fin.upper() and "WEIGHT" not in fin.upper(): 
+                    data["표면처리"] = fin
+                if wgt: 
+                    data["무게"] = wgt + "g"
+                elif weight_unit: 
+                    data["무게"] = ", ".join(weight_unit)
+
+                info = []
+                if part_name: info.append(f"명칭: {part_name}")
+                if part_no: info.append(f"품번: {part_no}")
+                if info:
+                    data["기타 표기"] = " | ".join(info) + "\n\n[원본 인식 텍스트]\n" + ocr_text.strip()
 
                 self.extracted_data = data
                 self.root.after(0, self._show_results, data)
