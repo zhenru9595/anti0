@@ -416,6 +416,7 @@ class DrawingExtractorApp:
                     pytesseract.pytesseract.tesseract_cmd = tess_path
                     
                 try:
+                    ocr_data = pytesseract.image_to_data(image, lang='eng+kor', output_type=pytesseract.Output.DICT)
                     ocr_text = pytesseract.image_to_string(image, lang='eng+kor')
                 except Exception as e:
                     if "tesseract is not installed" in str(e).lower() or "not found" in str(e).lower():
@@ -426,23 +427,71 @@ class DrawingExtractorApp:
                 data = {
                     "너비": "정보 없음", "길이": "정보 없음", "높이": "정보 없음",
                     "반경": "정보 없음", "무게": "정보 없음", "재질": "정보 없음", 
-                    "기타 표기": ocr_text.strip()
+                    "표면처리": "정보 없음", "기타 공정": "정보 없음", "기타 표기": ""
                 }
                 
-                # 도면 테이블 문자 데이터 추출을 위해 텍스트 전처리
-                text_block = ocr_text.replace('\n', ' ').replace('\r', ' ')
-                
-                def extract_val(pattern):
-                    m = re.search(pattern, text_block, re.IGNORECASE)
-                    return m.group(1).strip() if m else None
+                # --- 위치 기반(좌표 기반) 데이터 추출 로직 ---
+                words = []
+                for i in range(len(ocr_data['text'])):
+                    txt = ocr_data['text'][i].strip()
+                    if txt:
+                        words.append({
+                            'text': txt,
+                            'left': ocr_data['left'][i],
+                            'top': ocr_data['top'][i],
+                            'right': ocr_data['left'][i] + ocr_data['width'][i],
+                            'bottom': ocr_data['top'][i] + ocr_data['height'][i],
+                            'mid_x': ocr_data['left'][i] + ocr_data['width'][i] / 2,
+                            'mid_y': ocr_data['top'][i] + ocr_data['height'][i] / 2
+                        })
 
-                # 정규식을 통한 키워드 주변 텍스트 캡처 (블록 단위 인식 고려)
-                mat = extract_val(r'(?:재\s*질|MATERIAL)[\s:\|]*([A-Za-z0-9\-]+(?:[\s]*[A-Za-z0-9\-]+){0,2})')
-                # 표면처리는 ZnNi 12um 3+ 등 다양하므로 좀 더 넓게 허용
-                fin = extract_val(r'(?:표\s*면\s*처\s*리|FINISH)[\s:\|]*([A-Za-z0-9\-+\.]+([\s]*[A-Za-z0-9\-+\.]+){0,2})')
-                wgt = extract_val(r'(?:중\s*량|WEIGHT)[\s\(\)gG:\|]*(\d+(?:\.\d+)?)')
-                part_no = extract_val(r'(?:도\s*면\s*번\s*호|품\s*번|PART\s*NO\.?)[\s:\|]*([A-Za-z0-9\-]+)')
-                part_name = extract_val(r'(?:도\s*면\s*명\s*칭|PART\s*NAME)[\s:\|]*([A-Za-z0-9\-,\s]+)')
+                def find_below(keywords, max_drop=150, x_tolerance=50):
+                    # 1. 키워드 찾기
+                    anchor = None
+                    for w in words:
+                        if any(k.upper() in w['text'].upper() for k in keywords):
+                            anchor = w
+                            break
+                    if not anchor:
+                        return None
+                    
+                    # 2. 키워드 바로 아래 영역의 텍스트 수집
+                    L, R, B = anchor['left'], anchor['right'], anchor['bottom']
+                    candidates = []
+                    for w in words:
+                        if w['top'] > B and w['top'] < B + max_drop:
+                            if (L - x_tolerance) <= w['mid_x'] <= (R + x_tolerance):
+                                candidates.append(w)
+                    
+                    # 3. Y좌표가 너무 큰 차이가 나면 자르기 (다음 행으로 넘어가지 않게)
+                    if not candidates:
+                        return None
+                    candidates.sort(key=lambda x: (x['top'], x['left']))
+                    
+                    # 같은 칸 안에 있는 여러 줄 합치기
+                    result_lines = []
+                    current_line = []
+                    last_top = candidates[0]['top']
+                    
+                    for w in candidates:
+                        # top 좌표가 15px 이상 차이나면 다음 줄로 간주
+                        if w['top'] - last_top > 15:
+                            result_lines.append(" ".join([c['text'] for c in current_line]))
+                            current_line = []
+                        current_line.append(w)
+                        last_top = w['top']
+                    
+                    if current_line:
+                        result_lines.append(" ".join([c['text'] for c in current_line]))
+                    
+                    return "\n".join(result_lines).strip()
+
+                mat = find_below(["MATERIAL", "재질"])
+                fin = find_below(["FINISH", "표면처리"])
+                wgt = find_below(["WEIGHT", "중량"])
+                qty = find_below(["QTY", "수량"])
+                part_no = find_below(["PART NO", "도면번호", "품번"])
+                part_name = find_below(["PART NAME", "도면명칭"])
 
                 # 치수 단위 추출 (단순 룰)
                 dims = set(re.findall(r'(\d+(?:\.\d+)?[mM]{2})', ocr_text))
@@ -455,20 +504,20 @@ class DrawingExtractorApp:
                 if dims: data["길이"] = ", ".join(dims)
                 if radiuses: data["반경"] = ", ".join(radiuses)
                 
-                if mat and "FINISH" not in mat.upper() and "QTY" not in mat.upper(): 
-                    data["재질"] = mat
-                if fin and "QTY" not in fin.upper() and "WEIGHT" not in fin.upper(): 
-                    data["표면처리"] = fin
+                if mat: data["재질"] = mat
+                if fin: data["표면처리"] = fin
                 if wgt: 
                     data["무게"] = wgt + "g"
                 elif weight_unit: 
                     data["무게"] = ", ".join(weight_unit)
 
                 info = []
-                if part_name: info.append(f"명칭: {part_name}")
-                if part_no: info.append(f"품번: {part_no}")
+                if part_name: info.append(f"명칭: {part_name.replace(chr(10), ' ')}")
+                if part_no: info.append(f"품번: {part_no.replace(chr(10), ' ')}")
                 if info:
                     data["기타 표기"] = " | ".join(info) + "\n\n[원본 인식 텍스트]\n" + ocr_text.strip()
+                else:
+                    data["기타 표기"] = "[원본 인식 텍스트]\n" + ocr_text.strip()
 
                 self.extracted_data = data
                 self.root.after(0, self._show_results, data)
