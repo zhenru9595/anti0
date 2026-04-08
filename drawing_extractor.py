@@ -454,18 +454,27 @@ class DrawingExtractorApp:
                     
                     L, R, T, B = anchor['left'], anchor['right'], anchor['top'], anchor['bottom']
                     
+                    # 헤더 자체의 단어들이 값으로 추출되는 것을 막기 위한 필터
+                    ignore_subwords = {"PART", "NAME", "NO", "NO.", "MATERIAL", "FINISH", "WEIGHT", "QTY", 
+                                       "HEAT", "TREATMENT", "도면명칭", "도면번호", "품번", "품명", "재질", 
+                                       "표면처리", "중량", "수량", "열처리", "(G)", "(KG)", "G", "KG"}
+                    
+                    def is_valid_cand(w_txt):
+                        t = w_txt.upper().strip()
+                        return t not in ignore_subwords and len(t) > 0
+                    
                     # 1. 아래쪽 단어 찾기
                     below_cands = []
                     for w in words:
                         if B < w['top'] < B + max_drop and (L - x_tol) <= w['mid_x'] <= (R + x_tol):
-                            if not any(k.upper() == w['text'].upper().strip() for k in keywords):
+                            if is_valid_cand(w['text']):
                                 below_cands.append(w)
                     
                     # 2. 우측 단어 찾기
                     right_cands = []
                     for w in words:
                         if R < w['left'] < R + max_right and (T - y_tol) <= w['mid_y'] <= (B + y_tol):
-                            if not any(k.upper() == w['text'].upper().strip() for k in keywords):
+                            if is_valid_cand(w['text']):
                                 right_cands.append(w)
 
                     def format_cands(candidates):
