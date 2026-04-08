@@ -356,11 +356,9 @@ class DrawingExtractorApp:
                 "반드시 아래 JSON 키만 사용하여 응답하세요. 값이 없으면 '정보 없음'으로 표기.\n"
                 "단위는 값과 함께 표기 (예: 100mm, R5, 1.2kg).\n\n"
                 "{\n"
-                '  "너비 / Width": "...",\n'
-                '  "길이 / Length": "...",\n'
-                '  "높이 / Height": "...",\n'
-                '  "반경 / Radius": "...",\n'
-                '  "무게 / Weight": "...",\n'
+                '  "품번 / Part No.": "...",\n'
+                '  "품명 / Part Name": "...",\n'
+                '  "중량 / Weight": "...",\n'
                 '  "재질 / Material": "...",\n'
                 '  "표면처리 / Finish": "...",\n'
                 '  "열처리 / Heat Treatment": "...",\n'
@@ -425,12 +423,12 @@ class DrawingExtractorApp:
 
                 # 단순 룰 기반 필터링 초기값 준비
                 data = {
-                    "너비 / Width": "정보 없음", "길이 / Length": "정보 없음", "높이 / Height": "정보 없음",
-                    "반경 / Radius": "정보 없음", "무게 / Weight": "정보 없음", "재질 / Material": "정보 없음", 
-                    "표면처리 / Finish": "정보 없음", "열처리 / Heat Treatment": "정보 없음", "기타 공정 / Other Processes": "정보 없음", "기타 표기 / Remarks": ""
+                    "품번 / Part No.": "정보 없음", "품명 / Part Name": "정보 없음", "중량 / Weight": "정보 없음",
+                    "재질 / Material": "정보 없음", "표면처리 / Finish": "정보 없음", "열처리 / Heat Treatment": "정보 없음", 
+                    "기타 공정 / Other Processes": "정보 없음", "기타 표기 / Remarks": ""
                 }
                 
-                # --- 위치 기반(좌표 기반) 데이터 추출 로직 ---
+                # --- 가로/세로 전방위 위치 기반 데이터 추출 로직 ---
                 words = []
                 for i in range(len(ocr_data['text'])):
                     txt = ocr_data['text'][i].strip()
@@ -445,8 +443,7 @@ class DrawingExtractorApp:
                             'mid_y': ocr_data['top'][i] + ocr_data['height'][i] / 2
                         })
 
-                def find_below(keywords, max_drop=300, x_tolerance=200):
-                    # 1. 키워드 찾기
+                def find_value(keywords, max_drop=300, max_right=400, x_tol=200, y_tol=50):
                     anchor = None
                     for w in words:
                         if any(k.upper() in w['text'].upper() for k in keywords):
@@ -455,72 +452,81 @@ class DrawingExtractorApp:
                     if not anchor:
                         return None
                     
-                    # 2. 키워드 바로 아래 영역의 텍스트 수집 (여유폭 대폭 확대)
-                    L, R, B = anchor['left'], anchor['right'], anchor['bottom']
-                    candidates = []
+                    L, R, T, B = anchor['left'], anchor['right'], anchor['top'], anchor['bottom']
+                    
+                    # 1. 아래쪽 단어 찾기
+                    below_cands = []
                     for w in words:
-                        if w['top'] > B and w['top'] < B + max_drop:
-                            if (L - x_tolerance) <= w['mid_x'] <= (R + x_tolerance):
-                                # 헤더(키워드) 자신이 아래줄에 적혀있는 경우 제외
-                                if not any(k.upper() == w['text'].upper().strip() for k in keywords):
-                                    candidates.append(w)
+                        if B < w['top'] < B + max_drop and (L - x_tol) <= w['mid_x'] <= (R + x_tol):
+                            if not any(k.upper() == w['text'].upper().strip() for k in keywords):
+                                below_cands.append(w)
                     
-                    # 3. Y좌표가 너무 큰 차이가 나면 자르기 (다음 행으로 넘어가지 않게)
-                    if not candidates:
-                        return None
-                    candidates.sort(key=lambda x: (x['top'], x['left']))
-                    
-                    # 같은 칸 안에 있는 여러 줄 합치기
-                    result_lines = []
-                    current_line = []
-                    last_top = candidates[0]['top']
-                    
-                    for w in candidates:
-                        # top 좌표가 25px 이상 차이나면 다음 줄로 간주 (해상도 대비 여유)
-                        if abs(w['top'] - last_top) > 25:
-                            if current_line:
-                                result_lines.append(" ".join([c['text'] for c in current_line]))
-                            current_line = []
-                        current_line.append(w)
-                        last_top = w['top']
-                    
-                    if current_line:
-                        result_lines.append(" ".join([c['text'] for c in current_line]))
-                    
-                    return "\n".join(result_lines).strip()
+                    # 2. 우측 단어 찾기
+                    right_cands = []
+                    for w in words:
+                        if R < w['left'] < R + max_right and (T - y_tol) <= w['mid_y'] <= (B + y_tol):
+                            if not any(k.upper() == w['text'].upper().strip() for k in keywords):
+                                right_cands.append(w)
 
-                mat = find_below(["MATERIAL", "재질"])
-                fin = find_below(["FINISH", "표면처리"])
-                wgt = find_below(["WEIGHT", "중량"])
-                qty = find_below(["QTY", "수량"])
-                part_no = find_below(["PART NO", "도면번호", "품번"])
-                part_name = find_below(["PART NAME", "도면명칭"])
+                    def format_cands(candidates):
+                        if not candidates: return None
+                        candidates.sort(key=lambda x: (x['top'], x['left']))
+                        lines, current = [], []
+                        last_top = candidates[0]['top']
+                        for w in candidates:
+                            if abs(w['top'] - last_top) > 25:
+                                lines.append(" ".join([c['text'] for c in current]))
+                                current = []
+                            current.append(w)
+                            last_top = w['top']
+                        if current:
+                            lines.append(" ".join([c['text'] for c in current]))
+                        val = "\n".join(lines).strip()
+                        return val if val else None
 
-                # 치수 단위 추출 (단순 룰)
+                    val_below = format_cands(below_cands)
+                    val_right = format_cands(right_cands)
+
+                    # 아래쪽과 우측 중 더 가까운 쪽에 데이터가 있다고 판단
+                    if val_below and val_right:
+                        db = below_cands[0]['top'] - B
+                        dr = right_cands[0]['left'] - R
+                        return val_below if db <= dr else val_right
+                    return val_below or val_right
+
+                mat = find_value(["MATERIAL", "재질"])
+                fin = find_value(["FINISH", "표면처리"])
+                wgt = find_value(["WEIGHT", "중량"])
+                qty = find_value(["QTY", "수량"])
+                part_no = find_value(["PART NO", "도면번호", "품번"])
+                part_name = find_value(["PART NAME", "도면명칭", "품명"])
+                heat = find_value(["HEAT", "열처리"])
+
+                # 단순 치수 단위 추출 (단순 룰)
                 dims = set(re.findall(r'(\d+(?:\.\d+)?[mM]{2})', ocr_text))
                 radiuses = set(re.findall(r'[Rr]\d+', ocr_text))
                 threads = set(re.findall(r'[Mm]\d+', ocr_text))
                 weight_unit = set(re.findall(r'(\d+(?:\.\d+)?[kK]?[gG])', ocr_text))
 
                 # 추출된 데이터를 결과창에 바인딩
-                if threads: data["너비 / Width"] = ", ".join(threads)
-                if dims: data["길이 / Length"] = ", ".join(dims)
-                if radiuses: data["반경 / Radius"] = ", ".join(radiuses)
+                other_proc = []
+                if threads: other_proc.append("너비: " + ", ".join(threads))
+                if dims: other_proc.append("치수: " + ", ".join(dims))
+                if radiuses: other_proc.append("반경: " + ", ".join(radiuses))
                 
                 if mat: data["재질 / Material"] = mat
                 if fin: data["표면처리 / Finish"] = fin
-                if wgt: 
-                    data["무게 / Weight"] = wgt + "g"
-                elif weight_unit: 
-                    data["무게 / Weight"] = ", ".join(weight_unit)
+                if heat: data["열처리 / Heat Treatment"] = heat
+                if part_no: data["품번 / Part No."] = part_no.replace(chr(10), ' ')
+                if part_name: data["품명 / Part Name"] = part_name.replace(chr(10), ' ')
+                if other_proc: data["기타 공정 / Other Processes"] = " | ".join(other_proc)
 
-                info = []
-                if part_name: info.append(f"명칭(Name): {part_name.replace(chr(10), ' ')}")
-                if part_no: info.append(f"품번(Part No.): {part_no.replace(chr(10), ' ')}")
-                if info:
-                    data["기타 표기 / Remarks"] = " | ".join(info) + "\n\n[원본 인식 텍스트]\n" + ocr_text.strip()
-                else:
-                    data["기타 표기 / Remarks"] = "[원본 인식 텍스트]\n" + ocr_text.strip()
+                if wgt: 
+                    data["중량 / Weight"] = wgt + "g"
+                elif weight_unit: 
+                    data["중량 / Weight"] = ", ".join(weight_unit)
+
+                data["기타 표기 / Remarks"] = "[원본 인식 텍스트]\n" + ocr_text.strip()
 
                 self.extracted_data = data
                 self.root.after(0, self._show_results, data)
@@ -580,7 +586,7 @@ class DrawingExtractorApp:
     def _show_results(self, data: dict):
         for row in self.tree.get_children():
             self.tree.delete(row)
-        fields = ["너비 / Width", "길이 / Length", "높이 / Height", "반경 / Radius", "무게 / Weight", "재질 / Material", "표면처리 / Finish", "열처리 / Heat Treatment", "기타 공정 / Other Processes", "기타 표기 / Remarks"]
+        fields = ["품번 / Part No.", "품명 / Part Name", "중량 / Weight", "재질 / Material", "표면처리 / Finish", "열처리 / Heat Treatment", "기타 공정 / Other Processes", "기타 표기 / Remarks"]
         for i, key in enumerate(fields):
             tag = "odd" if i % 2 else "even"
             self.tree.insert("", tk.END, values=(key, data.get(key, "정보 없음")), tags=(tag,))
@@ -637,7 +643,7 @@ class DrawingExtractorApp:
                 c.border = thin
             ws.row_dimensions[3].height = 26
 
-            fields = ["너비 / Width", "길이 / Length", "높이 / Height", "반경 / Radius", "무게 / Weight", "재질 / Material", "표면처리 / Finish", "열처리 / Heat Treatment", "기타 공정 / Other Processes", "기타 표기 / Remarks"]
+            fields = ["품번 / Part No.", "품명 / Part Name", "중량 / Weight", "재질 / Material", "표면처리 / Finish", "열처리 / Heat Treatment", "기타 공정 / Other Processes", "기타 표기 / Remarks"]
             for i, key in enumerate(fields, start=4):
                 bg = "F5F7FF" if i % 2 == 0 else "FFFFFF"
                 ws[f"A{i}"] = key
