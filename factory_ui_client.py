@@ -135,3 +135,10 @@ if __name__ == '__main__':
     window = RealTimePlotWindow()
     window.show()
     sys.exit(app.exec())
+
+
+    
+
+
+            
+

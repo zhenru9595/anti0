@@ -414,8 +414,18 @@ class DrawingExtractorApp:
                     pytesseract.pytesseract.tesseract_cmd = tess_path
                     
                 try:
-                    ocr_data = pytesseract.image_to_data(image, lang='eng+kor', output_type=pytesseract.Output.DICT)
-                    ocr_text = pytesseract.image_to_string(image, lang='eng+kor')
+                    from PIL import ImageEnhance
+                    ocr_img = image.convert('L')
+                    if ocr_img.width < 2000:
+                        ocr_img = ocr_img.resize((int(ocr_img.width * 1.5), int(ocr_img.height * 1.5)), Image.Resampling.LANCZOS)
+                    enhancer = ImageEnhance.Contrast(ocr_img)
+                    ocr_img = enhancer.enhance(2.0)
+                    enhancer = ImageEnhance.Sharpness(ocr_img)
+                    ocr_img = enhancer.enhance(2.0)
+                    
+                    custom_config = r'--oem 3 --psm 6'
+                    ocr_data = pytesseract.image_to_data(ocr_img, lang='kor+eng', config=custom_config, output_type=pytesseract.Output.DICT)
+                    ocr_text = pytesseract.image_to_string(ocr_img, lang='kor+eng', config=custom_config)
                 except Exception as e:
                     if "tesseract is not installed" in str(e).lower() or "not found" in str(e).lower():
                         raise RuntimeError("Tesseract 프로그램이 설치되지 않았습니다.\nhttps://github.com/UB-Mannheim/tesseract/wiki 에서 윈도우 설치파일을 다운로드해주세요.")
@@ -443,7 +453,7 @@ class DrawingExtractorApp:
                             'mid_y': ocr_data['top'][i] + ocr_data['height'][i] / 2
                         })
 
-                def find_value(keywords, max_drop=300, max_right=400, x_tol=200, y_tol=50):
+                def find_value(keywords, max_drop_factor=8, max_right_factor=15, x_tol_factor=8, y_tol_factor=1.5):
                     anchor = None
                     for w in words:
                         if any(k.upper() in w['text'].upper() for k in keywords):
@@ -452,28 +462,38 @@ class DrawingExtractorApp:
                     if not anchor:
                         return None
                     
+                    # 앵커 텍스트 자체에 값이 붙어있는 경우 (예: "재질:STS304")
+                    anchor_text = anchor['text']
+                    for k in keywords:
+                        if k.upper() in anchor_text.upper():
+                            idx = anchor_text.upper().find(k.upper()) + len(k)
+                            val_in_anchor = anchor_text[idx:].lstrip(" :>=\t-._")
+                            if len(val_in_anchor) > 1:
+                                return val_in_anchor
+                                
                     L, R, T, B = anchor['left'], anchor['right'], anchor['top'], anchor['bottom']
+                    H = max(B - T, 12)  # 폰트 높이 추정 (최소치수 설정)
                     
                     # 헤더 자체의 단어들이 값으로 추출되는 것을 막기 위한 필터
                     ignore_subwords = {"PART", "NAME", "NO", "NO.", "MATERIAL", "FINISH", "WEIGHT", "QTY", 
                                        "HEAT", "TREATMENT", "도면명칭", "도면번호", "품번", "품명", "재질", 
-                                       "표면처리", "중량", "수량", "열처리", "(G)", "(KG)", "G", "KG"}
+                                       "표면처리", "중량", "수량", "열처리", "(G)", "(KG)", "G", "KG", ":", "-", "o"}
                     
                     def is_valid_cand(w_txt):
                         t = w_txt.upper().strip()
-                        return t not in ignore_subwords and len(t) > 0
+                        return t not in ignore_subwords and len(t.replace(':', '').replace('-', '').strip()) > 0
                     
                     # 1. 아래쪽 단어 찾기
                     below_cands = []
                     for w in words:
-                        if B < w['top'] < B + max_drop and (L - x_tol) <= w['mid_x'] <= (R + x_tol):
+                        if B < w['top'] < B + (H * max_drop_factor) and (L - H * x_tol_factor) <= w['mid_x'] <= (R + H * x_tol_factor):
                             if is_valid_cand(w['text']):
                                 below_cands.append(w)
                     
                     # 2. 우측 단어 찾기
                     right_cands = []
                     for w in words:
-                        if R < w['left'] < R + max_right and (T - y_tol) <= w['mid_y'] <= (B + y_tol):
+                        if R < w['left'] < R + (H * max_right_factor) and (T - H * y_tol_factor) <= w['mid_y'] <= (B + H * y_tol_factor):
                             if is_valid_cand(w['text']):
                                 right_cands.append(w)
 
@@ -483,12 +503,14 @@ class DrawingExtractorApp:
                         lines, current = [], []
                         last_top = candidates[0]['top']
                         for w in candidates:
-                            if abs(w['top'] - last_top) > 25:
+                            if abs(w['top'] - last_top) > H * 1.5:
+                                current.sort(key=lambda x: x['left'])
                                 lines.append(" ".join([c['text'] for c in current]))
                                 current = []
                             current.append(w)
                             last_top = w['top']
                         if current:
+                            current.sort(key=lambda x: x['left'])
                             lines.append(" ".join([c['text'] for c in current]))
                         val = "\n".join(lines).strip()
                         return val if val else None
